@@ -11,7 +11,7 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
-import { startCredentialProxy } from './credential-proxy.js';
+import { detectAuthMode, startCredentialProxy } from './credential-proxy.js';
 
 function makeRequest(
   port: number,
@@ -44,42 +44,76 @@ function makeRequest(
 }
 
 describe('credential-proxy', () => {
-  let proxyServer: http.Server;
-  let upstreamServer: http.Server;
+  let proxyServer: http.Server | undefined;
+  let upstreamServer: http.Server | undefined;
+  let fallbackServer: http.Server | undefined;
   let proxyPort: number;
   let upstreamPort: number;
+  let fallbackPort: number;
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
+  let lastFallbackHeaders: http.IncomingHttpHeaders;
+  let upstreamStatusCode = 200;
+  let upstreamBody = JSON.stringify({ ok: true, source: 'primary' });
+  let fallbackBody = JSON.stringify({ ok: true, source: 'fallback' });
+  let upstreamCalls = 0;
+  let fallbackCalls = 0;
 
   beforeEach(async () => {
     lastUpstreamHeaders = {};
+    lastFallbackHeaders = {};
+    upstreamStatusCode = 200;
+    upstreamBody = JSON.stringify({ ok: true, source: 'primary' });
+    fallbackBody = JSON.stringify({ ok: true, source: 'fallback' });
+    upstreamCalls = 0;
+    fallbackCalls = 0;
 
     upstreamServer = http.createServer((req, res) => {
+      upstreamCalls += 1;
       lastUpstreamHeaders = { ...req.headers };
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      res.writeHead(upstreamStatusCode, { 'content-type': 'application/json' });
+      res.end(upstreamBody);
     });
     await new Promise<void>((resolve) =>
-      upstreamServer.listen(0, '127.0.0.1', resolve),
+      upstreamServer!.listen(0, '127.0.0.1', resolve),
     );
     upstreamPort = (upstreamServer.address() as AddressInfo).port;
+
+    fallbackServer = http.createServer((req, res) => {
+      fallbackCalls += 1;
+      lastFallbackHeaders = { ...req.headers };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(fallbackBody);
+    });
+    await new Promise<void>((resolve) =>
+      fallbackServer!.listen(0, '127.0.0.1', resolve),
+    );
+    fallbackPort = (fallbackServer.address() as AddressInfo).port;
   });
 
   afterEach(async () => {
-    await new Promise<void>((r) => proxyServer?.close(() => r()));
-    await new Promise<void>((r) => upstreamServer?.close(() => r()));
+    if (proxyServer) {
+      await new Promise<void>((r) => proxyServer!.close(() => r()));
+    }
+    if (upstreamServer) {
+      await new Promise<void>((r) => upstreamServer!.close(() => r()));
+    }
+    if (fallbackServer) {
+      await new Promise<void>((r) => fallbackServer!.close(() => r()));
+    }
     for (const key of Object.keys(mockEnv)) delete mockEnv[key];
   });
 
   async function startProxy(env: Record<string, string>): Promise<number> {
-    Object.assign(mockEnv, env, {
-      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
-    });
+    Object.assign(mockEnv, env);
     proxyServer = await startCredentialProxy(0);
     return (proxyServer.address() as AddressInfo).port;
   }
 
   it('API-key mode injects x-api-key and strips placeholder', async () => {
-    proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+    proxyPort = await startProxy({
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    });
 
     await makeRequest(
       proxyPort,
@@ -100,6 +134,7 @@ describe('credential-proxy', () => {
   it('OAuth mode replaces Authorization when container sends one', async () => {
     proxyPort = await startProxy({
       CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
     });
 
     await makeRequest(
@@ -115,17 +150,15 @@ describe('credential-proxy', () => {
       '{}',
     );
 
-    expect(lastUpstreamHeaders['authorization']).toBe(
-      'Bearer real-oauth-token',
-    );
+    expect(lastUpstreamHeaders.authorization).toBe('Bearer real-oauth-token');
   });
 
   it('OAuth mode does not inject Authorization when container omits it', async () => {
     proxyPort = await startProxy({
       CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
     });
 
-    // Post-exchange: container uses x-api-key only, no Authorization header
     await makeRequest(
       proxyPort,
       {
@@ -140,11 +173,14 @@ describe('credential-proxy', () => {
     );
 
     expect(lastUpstreamHeaders['x-api-key']).toBe('temp-key-from-exchange');
-    expect(lastUpstreamHeaders['authorization']).toBeUndefined();
+    expect(lastUpstreamHeaders.authorization).toBeUndefined();
   });
 
   it('strips hop-by-hop headers', async () => {
-    proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+    proxyPort = await startProxy({
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    });
 
     await makeRequest(
       proxyPort,
@@ -161,20 +197,15 @@ describe('credential-proxy', () => {
       '{}',
     );
 
-    // Proxy strips client hop-by-hop headers. Node's HTTP client may re-add
-    // its own Connection header (standard HTTP/1.1 behavior), but the client's
-    // custom keep-alive and transfer-encoding must not be forwarded.
     expect(lastUpstreamHeaders['keep-alive']).toBeUndefined();
     expect(lastUpstreamHeaders['transfer-encoding']).toBeUndefined();
   });
 
   it('returns 502 when upstream is unreachable', async () => {
-    Object.assign(mockEnv, {
+    proxyPort = await startProxy({
       ANTHROPIC_API_KEY: 'sk-ant-real-key',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
     });
-    proxyServer = await startCredentialProxy(0);
-    proxyPort = (proxyServer.address() as AddressInfo).port;
 
     const res = await makeRequest(
       proxyPort,
@@ -188,5 +219,96 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('falls back to the secondary upstream on 429 responses', async () => {
+    upstreamStatusCode = 429;
+    upstreamBody = JSON.stringify({
+      error: {
+        type: 'rate_limit_error',
+        message: 'subscription limit reached',
+      },
+    });
+
+    proxyPort = await startProxy({
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+      NANOCLAW_FALLBACK_BASE_URL: `http://127.0.0.1:${fallbackPort}`,
+    });
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, source: 'fallback' });
+    expect(upstreamCalls).toBe(1);
+    expect(fallbackCalls).toBe(1);
+    expect(lastFallbackHeaders['x-api-key']).toBeUndefined();
+  });
+
+  it('injects fallback API key when configured', async () => {
+    upstreamStatusCode = 429;
+    upstreamBody = JSON.stringify({
+      error: { type: 'rate_limit_error', message: 'too many requests' },
+    });
+
+    proxyPort = await startProxy({
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+      NANOCLAW_FALLBACK_BASE_URL: `http://127.0.0.1:${fallbackPort}`,
+      NANOCLAW_FALLBACK_API_KEY: 'litellm-secret',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastFallbackHeaders['x-api-key']).toBe('litellm-secret');
+  });
+
+  it('routes directly to fallback in fallback-only mode and uses api-key auth mode', async () => {
+    proxyPort = await startProxy({
+      NANOCLAW_FALLBACK_BASE_URL: `http://127.0.0.1:${fallbackPort}`,
+    });
+
+    expect(detectAuthMode()).toBe('api-key');
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, source: 'fallback' });
+    expect(upstreamCalls).toBe(0);
+    expect(fallbackCalls).toBe(1);
+    expect(lastFallbackHeaders['x-api-key']).toBeUndefined();
   });
 });

@@ -4,8 +4,10 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
+import { readAgentConfig, recordContainerUsage } from './agent-config.js';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
@@ -44,8 +46,9 @@ export interface ContainerInput {
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'progress';
   result: string | null;
+  progressText?: string;
   newSessionId?: string;
   error?: string;
 }
@@ -75,17 +78,6 @@ function buildVolumeMounts(
       containerPath: '/workspace/project',
       readonly: true,
     });
-
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the credential proxy, never exposed to containers.
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
 
     // Main also gets its group folder as the working directory
     mounts.push({
@@ -199,6 +191,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // SSH keys (read-only) so the agent can access GitHub and other SSH hosts
+  const sshDir = path.join(os.homedir(), '.ssh');
+  if (fs.existsSync(sshDir)) {
+    mounts.push({
+      hostPath: sshDir,
+      containerPath: '/home/node/.ssh',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -221,6 +223,18 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Model and thinking settings
+  const agentConfig = readAgentConfig();
+  if (agentConfig.model) {
+    args.push('-e', `NANOCLAW_MODEL=${agentConfig.model}`);
+  }
+  if (agentConfig.maxThinkingTokens) {
+    args.push(
+      '-e',
+      `NANOCLAW_MAX_THINKING_TOKENS=${agentConfig.maxThinkingTokens}`,
+    );
+  }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -443,6 +457,9 @@ export async function runContainerAgent(
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+
+      // Accumulate token usage written by the agent runner
+      recordContainerUsage(resolveGroupIpcPath(group.folder));
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');

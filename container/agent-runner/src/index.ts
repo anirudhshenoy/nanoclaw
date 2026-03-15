@@ -30,8 +30,9 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'progress';
   result: string | null;
+  progressText?: string;
   newSessionId?: string;
   error?: string;
 }
@@ -115,6 +116,15 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+function getProgressLabel(toolName: string): string {
+  if (toolName === 'Bash') return 'Running commands...';
+  if (toolName === 'WebFetch' || toolName === 'WebSearch') return 'Browsing the web...';
+  if (toolName === 'Task' || toolName === 'TaskOutput' || toolName === 'TaskStop') return 'Running a subtask...';
+  if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit' || toolName === 'Glob' || toolName === 'Grep') return 'Reading files...';
+  if (toolName.startsWith('mcp__nanoclaw__')) return 'Sending a message...';
+  return 'Working...';
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -329,14 +339,24 @@ function waitForIpcMessage(): Promise<string | null> {
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
+interface QueryUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUSD: number;
+}
+
 async function runQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerPath: string,
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
+  model: string | undefined,
+  maxThinkingTokens: number | undefined,
   resumeAt?: string,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; usage: QueryUsage }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
@@ -365,6 +385,7 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  const usage: QueryUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUSD: 0 };
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -396,6 +417,8 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
+      model,
+      maxThinkingTokens,
       systemPrompt: globalClaudeMd
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
         : undefined,
@@ -437,6 +460,15 @@ async function runQuery(
       lastAssistantUuid = (message as { uuid: string }).uuid;
     }
 
+    if (message.type === 'assistant') {
+      const content = (message as { message?: { content?: Array<{ type: string; name?: string }> } }).message?.content ?? [];
+      for (const block of content) {
+        if (block.type === 'tool_use' && block.name) {
+          writeOutput({ status: 'progress', result: null, progressText: getProgressLabel(block.name) });
+        }
+      }
+    }
+
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
@@ -449,8 +481,15 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      const res = message as { result?: string; total_cost_usd?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
+      const textResult = res.result ?? null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      // Accumulate usage
+      usage.inputTokens += res.usage?.input_tokens ?? 0;
+      usage.outputTokens += res.usage?.output_tokens ?? 0;
+      usage.cacheReadTokens += res.usage?.cache_read_input_tokens ?? 0;
+      usage.cacheCreationTokens += res.usage?.cache_creation_input_tokens ?? 0;
+      usage.costUSD += res.total_cost_usd ?? 0;
       writeOutput({
         status: 'success',
         result: textResult || null,
@@ -460,8 +499,8 @@ async function runQuery(
   }
 
   ipcPolling = false;
-  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, cost: $${usage.costUSD.toFixed(4)}`);
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, usage };
 }
 
 async function main(): Promise<void> {
@@ -485,6 +524,14 @@ async function main(): Promise<void> {
   // No real secrets exist in the container environment.
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
 
+  const agentModel = process.env.NANOCLAW_MODEL || undefined;
+  const agentMaxThinkingTokens = process.env.NANOCLAW_MAX_THINKING_TOKENS
+    ? parseInt(process.env.NANOCLAW_MAX_THINKING_TOKENS, 10)
+    : undefined;
+
+  if (agentModel) log(`Using model: ${agentModel}`);
+  if (agentMaxThinkingTokens) log(`Max thinking tokens: ${agentMaxThinkingTokens}`);
+
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
 
@@ -507,17 +554,36 @@ async function main(): Promise<void> {
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
+  const totalUsage: QueryUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUSD: 0 };
+
+  const writeSessionUsage = () => {
+    try {
+      fs.writeFileSync(
+        '/workspace/ipc/session-usage.json',
+        JSON.stringify(totalUsage),
+      );
+    } catch {
+      // ignore
+    }
+  };
+
   try {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, agentModel, agentMaxThinkingTokens, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
       }
+      // Accumulate usage across all queries in this session
+      totalUsage.inputTokens += queryResult.usage.inputTokens;
+      totalUsage.outputTokens += queryResult.usage.outputTokens;
+      totalUsage.cacheReadTokens += queryResult.usage.cacheReadTokens;
+      totalUsage.cacheCreationTokens += queryResult.usage.cacheCreationTokens;
+      totalUsage.costUSD += queryResult.usage.costUSD;
 
       // If _close was consumed during the query, exit immediately.
       // Don't emit a session-update marker (it would reset the host's
@@ -526,6 +592,9 @@ async function main(): Promise<void> {
         log('Close sentinel consumed during query, exiting');
         break;
       }
+
+      // Persist usage after each query so /usage reflects live data
+      writeSessionUsage();
 
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
@@ -551,8 +620,11 @@ async function main(): Promise<void> {
       newSessionId: sessionId,
       error: errorMessage
     });
+    writeSessionUsage();
     process.exit(1);
   }
+
+  writeSessionUsage();
 }
 
 main();
