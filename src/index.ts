@@ -301,7 +301,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const elapsed = now - agentStartTime;
       const isDifferent = text !== lastSentProgressText;
       const pastDedup = now - lastProgressSentAt > PROGRESS_DEDUP_MS;
-      if (elapsed > PROGRESS_SILENCE_MS && (isDifferent || pastDedup)) {
+      if (elapsed > PROGRESS_SILENCE_MS && pastDedup && isDifferent) {
         try {
           await channel.sendMessage(chatJid, text);
           lastSentProgressText = text;
