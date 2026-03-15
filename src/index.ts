@@ -171,7 +171,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Intercept slash commands for main group
   if (isMainGroup) {
     const lastMsg = missedMessages[missedMessages.length - 1];
-    const cmdText = lastMsg.content.trim();
+    // Strip Telegram @botname suffix from commands (e.g. /session@mybot → /session)
+    const cmdText = lastMsg.content.trim().replace(/^(\/\w+)@\S+/, '$1');
 
     let response: string | null = null;
     if (cmdText.startsWith('/model')) {
@@ -233,10 +234,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing agent stdin',
-      );
+      logger.debug({ group: group.name }, 'Idle timeout, closing agent stdin');
       queue.closeStdin(chatJid);
     }, IDLE_TIMEOUT);
   };
