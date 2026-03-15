@@ -6,9 +6,11 @@ import {
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
+  TELEGRAM_BOT_POOL,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
+import { initBotPool } from './channels/telegram.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
@@ -27,6 +29,7 @@ import {
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
+  clearSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -45,6 +48,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { handleModelCommand, handleThinkingCommand, handleUsageCommand } from './agent-config.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -164,6 +168,40 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // Intercept slash commands for main group
+  if (isMainGroup) {
+    const lastMsg = missedMessages[missedMessages.length - 1];
+    const cmdText = lastMsg.content.trim();
+
+    let response: string | null = null;
+    if (cmdText.startsWith('/model')) {
+      response = handleModelCommand(cmdText);
+    } else if (cmdText.startsWith('/thinking')) {
+      response = handleThinkingCommand(cmdText);
+    } else if (cmdText.startsWith('/usage')) {
+      response = handleUsageCommand();
+    } else if (cmdText.startsWith('/session')) {
+      const args = cmdText.slice('/session'.length).trim();
+      if (args === 'new' || args === 'reset') {
+        delete sessions[group.folder];
+        clearSession(group.folder);
+        response = 'Session cleared. Starting fresh on next message.';
+      } else {
+        const sessionId = sessions[group.folder];
+        response = sessionId
+          ? `Active session: ${sessionId}`
+          : 'No active session (will start fresh on next message).';
+      }
+    }
+
+    if (response !== null) {
+      await channel.sendMessage(chatJid, response);
+      lastAgentTimestamp[chatJid] = lastMsg.timestamp;
+      saveState();
+      return true;
+    }
+  }
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
@@ -207,8 +245,62 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Smart progress heartbeat:
+  //   - Silent for the first 8s (fast responses need no noise)
+  //   - Immediately forwards distinct tool-change labels from the agent
+  //   - Deduplicates: won't re-send the same label within 15s
+  //   - Keep-alive fires after 90s of silence on the same activity,
+  //     appending elapsed time so the user knows we're still alive
+  const PROGRESS_SILENCE_MS = 8_000;
+  const PROGRESS_DEDUP_MS = 15_000;
+  const PROGRESS_KEEPALIVE_MS = 90_000;
+  const agentStartTime = Date.now();
+  let lastSentProgressText: string | null = null;
+  let lastProgressSentAt = 0;
+  let keepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearKeepAlive = () => {
+    if (keepAliveTimer) { clearTimeout(keepAliveTimer); keepAliveTimer = null; }
+  };
+
+  const scheduleKeepAlive = (text: string) => {
+    clearKeepAlive();
+    keepAliveTimer = setTimeout(async () => {
+      if (outputSentToUser) return;
+      const elapsedSec = Math.round((Date.now() - agentStartTime) / 1000);
+      const elapsedLabel = elapsedSec >= 60
+        ? `${Math.round(elapsedSec / 60)}m`
+        : `${elapsedSec}s`;
+      try {
+        await channel.sendMessage(chatJid, `${text} (${elapsedLabel})`);
+        lastProgressSentAt = Date.now();
+      } catch (err) {
+        logger.warn({ group: group.name, err }, 'Failed to send progress keep-alive');
+      }
+      scheduleKeepAlive(text);
+    }, PROGRESS_KEEPALIVE_MS);
+  };
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
+    if (result.status === 'progress' && result.progressText && !outputSentToUser) {
+      const text = result.progressText;
+      const now = Date.now();
+      const elapsed = now - agentStartTime;
+      const isDifferent = text !== lastSentProgressText;
+      const pastDedup = now - lastProgressSentAt > PROGRESS_DEDUP_MS;
+      if (elapsed > PROGRESS_SILENCE_MS && (isDifferent || pastDedup)) {
+        try {
+          await channel.sendMessage(chatJid, text);
+          lastSentProgressText = text;
+          lastProgressSentAt = now;
+          scheduleKeepAlive(text);
+        } catch (err) {
+          logger.warn({ group: group.name, err }, 'Failed to send progress message');
+        }
+      }
+    }
+
     if (result.result) {
       const raw =
         typeof result.result === 'string'
@@ -218,6 +310,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
+        clearKeepAlive();
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -234,6 +327,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
+  clearKeepAlive();
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
@@ -538,6 +632,10 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  if (TELEGRAM_BOT_POOL.length > 0) {
+    await initBotPool(TELEGRAM_BOT_POOL);
   }
 
   // Start subsystems (independently of connection handler)

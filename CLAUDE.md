@@ -59,6 +59,24 @@ systemctl --user restart nanoclaw
 
 **WhatsApp not connecting after upgrade:** WhatsApp is now a separate channel fork, not bundled in core. Run `/add-whatsapp` (or `git remote add whatsapp https://github.com/qwibitai/nanoclaw-whatsapp.git && git fetch whatsapp main && (git merge whatsapp/main || { git checkout --theirs package-lock.json && git add package-lock.json && git merge --continue; }) && npm run build`) to install it. Existing auth credentials and groups are preserved.
 
+## Container Runtime
+
+This installation uses **Apple Container** (not Docker). All container commands use `container` not `docker`. The build script (`./container/build.sh`) uses `CONTAINER_RUNTIME=container` by default.
+
 ## Container Build Cache
 
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+For normal Dockerfile edits (e.g. changing a `RUN` step), just run:
+
+```bash
+./container/build.sh
+```
+
+The cache invalidates automatically at the changed layer — no need to delete the builder.
+
+Only use `container builder delete --force` when stale files from `COPY` steps are the problem (the builder's volume can retain old copied files even with `--no-cache`). Deleting the builder forces a full re-download of all packages (~253 MB) and takes 10+ minutes — don't do it unnecessarily.
+
+## SSH / GitHub Access in Containers
+
+Agents run as the host uid (e.g. 501) inside Linux containers. OpenSSH requires the uid to have an entry in `/etc/passwd` — without it, all SSH operations (including `git push`) fail even if the keys are mounted correctly.
+
+**Fix (already applied):** The entrypoint adds a `/etc/passwd` entry for `RUN_UID` before dropping privileges via `setpriv`. This only applies to main-group containers (which start as root). Non-main containers start directly as the host uid and cannot write `/etc/passwd` — avoid SSH-based git in non-main containers, or use HTTPS with a token instead.
