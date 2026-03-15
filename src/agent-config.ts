@@ -71,7 +71,8 @@ export function recordContainerUsage(groupIpcDir: string): void {
     inputTokens: day.inputTokens + (usage.inputTokens || 0),
     outputTokens: day.outputTokens + (usage.outputTokens || 0),
     cacheReadTokens: day.cacheReadTokens + (usage.cacheReadTokens || 0),
-    cacheCreationTokens: day.cacheCreationTokens + (usage.cacheCreationTokens || 0),
+    cacheCreationTokens:
+      day.cacheCreationTokens + (usage.cacheCreationTokens || 0),
     costUSD: day.costUSD + (usage.costUSD || 0),
     sessions: day.sessions + 1,
   };
@@ -155,8 +156,8 @@ export function handleModelCommand(text: string): string {
 
   if (args === 'list') {
     const currentModel = config.model ?? 'claude-sonnet-4-6';
-    return MODEL_LIST.map((id) =>
-      `${id === currentModel ? '→' : ' '} ${id}`,
+    return MODEL_LIST.map(
+      (id) => `${id === currentModel ? '→' : ' '} ${id}`,
     ).join('\n');
   }
 

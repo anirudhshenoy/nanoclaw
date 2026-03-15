@@ -48,7 +48,11 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { handleModelCommand, handleThinkingCommand, handleUsageCommand } from './agent-config.js';
+import {
+  handleModelCommand,
+  handleThinkingCommand,
+  handleUsageCommand,
+} from './agent-config.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -260,7 +264,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let keepAliveTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearKeepAlive = () => {
-    if (keepAliveTimer) { clearTimeout(keepAliveTimer); keepAliveTimer = null; }
+    if (keepAliveTimer) {
+      clearTimeout(keepAliveTimer);
+      keepAliveTimer = null;
+    }
   };
 
   const scheduleKeepAlive = (text: string) => {
@@ -268,14 +275,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     keepAliveTimer = setTimeout(async () => {
       if (outputSentToUser) return;
       const elapsedSec = Math.round((Date.now() - agentStartTime) / 1000);
-      const elapsedLabel = elapsedSec >= 60
-        ? `${Math.round(elapsedSec / 60)}m`
-        : `${elapsedSec}s`;
+      const elapsedLabel =
+        elapsedSec >= 60 ? `${Math.round(elapsedSec / 60)}m` : `${elapsedSec}s`;
       try {
         await channel.sendMessage(chatJid, `${text} (${elapsedLabel})`);
         lastProgressSentAt = Date.now();
       } catch (err) {
-        logger.warn({ group: group.name, err }, 'Failed to send progress keep-alive');
+        logger.warn(
+          { group: group.name, err },
+          'Failed to send progress keep-alive',
+        );
       }
       scheduleKeepAlive(text);
     }, PROGRESS_KEEPALIVE_MS);
@@ -283,7 +292,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
-    if (result.status === 'progress' && result.progressText && !outputSentToUser) {
+    if (
+      result.status === 'progress' &&
+      result.progressText &&
+      !outputSentToUser
+    ) {
       const text = result.progressText;
       const now = Date.now();
       const elapsed = now - agentStartTime;
@@ -296,7 +309,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           lastProgressSentAt = now;
           scheduleKeepAlive(text);
         } catch (err) {
-          logger.warn({ group: group.name, err }, 'Failed to send progress message');
+          logger.warn(
+            { group: group.name, err },
+            'Failed to send progress message',
+          );
         }
       }
     }

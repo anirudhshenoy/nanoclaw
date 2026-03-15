@@ -21,7 +21,9 @@ function detectHostGateway(): string {
     const ifaces = os.networkInterfaces();
     for (const name of Object.keys(ifaces)) {
       if (name.startsWith('bridge')) {
-        const ipv4 = ifaces[name]!.find((a) => a.family === 'IPv4' && !a.internal);
+        const ipv4 = ifaces[name]!.find(
+          (a) => a.family === 'IPv4' && !a.internal,
+        );
         if (ipv4) return ipv4.address;
       }
     }

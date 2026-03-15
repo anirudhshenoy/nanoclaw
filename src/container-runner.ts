@@ -230,7 +230,10 @@ function buildContainerArgs(
     args.push('-e', `NANOCLAW_MODEL=${agentConfig.model}`);
   }
   if (agentConfig.maxThinkingTokens) {
-    args.push('-e', `NANOCLAW_MAX_THINKING_TOKENS=${agentConfig.maxThinkingTokens}`);
+    args.push(
+      '-e',
+      `NANOCLAW_MAX_THINKING_TOKENS=${agentConfig.maxThinkingTokens}`,
+    );
   }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
