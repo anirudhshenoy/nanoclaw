@@ -4,7 +4,7 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running as child processes on the host. Each group has isolated filesystem and memory.
 
 ## Key Files
 
@@ -15,7 +15,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns agent containers with mounts |
+| `src/agent-spawner.ts` | Spawns agent processes and handles IPC |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
@@ -27,7 +27,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 |-------|-------------|
 | `/setup` | First-time installation, authentication, service configuration |
 | `/customize` | Adding channels, integrations, changing behavior |
-| `/debug` | Container issues, logs, troubleshooting |
+| `/debug` | Agent issues, logs, troubleshooting |
 | `/update-nanoclaw` | Bring upstream NanoClaw updates into a customized install |
 | `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
 | `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
@@ -59,24 +59,6 @@ systemctl --user restart nanoclaw
 
 **WhatsApp not connecting after upgrade:** WhatsApp is now a separate channel fork, not bundled in core. Run `/add-whatsapp` (or `git remote add whatsapp https://github.com/qwibitai/nanoclaw-whatsapp.git && git fetch whatsapp main && (git merge whatsapp/main || { git checkout --theirs package-lock.json && git add package-lock.json && git merge --continue; }) && npm run build`) to install it. Existing auth credentials and groups are preserved.
 
-## Container Runtime
+## Agent Processes
 
-This installation uses **Apple Container** (not Docker). All container commands use `container` not `docker`. The build script (`./container/build.sh`) uses `CONTAINER_RUNTIME=container` by default.
-
-## Container Build Cache
-
-For normal Dockerfile edits (e.g. changing a `RUN` step), just run:
-
-```bash
-./container/build.sh
-```
-
-The cache invalidates automatically at the changed layer — no need to delete the builder.
-
-Only use `container builder delete --force` when stale files from `COPY` steps are the problem (the builder's volume can retain old copied files even with `--no-cache`). Deleting the builder forces a full re-download of all packages (~253 MB) and takes 10+ minutes — don't do it unnecessarily.
-
-## SSH / GitHub Access in Containers
-
-Agents run as the host uid (e.g. 501) inside Linux containers. OpenSSH requires the uid to have an entry in `/etc/passwd` — without it, all SSH operations (including `git push`) fail even if the keys are mounted correctly.
-
-**Fix (already applied):** The entrypoint adds a `/etc/passwd` entry for `RUN_UID` before dropping privileges via `setpriv`. This only applies to main-group containers (which start as root). Non-main containers start directly as the host uid and cannot write `/etc/passwd` — avoid SSH-based git in non-main containers, or use HTTPS with a token instead.
+Agents run as direct child processes on the host (no containers). Each agent process gets an isolated HOME directory (`data/sessions/{group}/`) and communicates via IPC files. The credential proxy ensures agent processes never see real API keys.

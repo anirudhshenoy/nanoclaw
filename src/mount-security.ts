@@ -2,7 +2,7 @@
  * Mount Security Module for NanoClaw
  *
  * Validates additional mounts against an allowlist stored OUTSIDE the project root.
- * This prevents container agents from modifying security configuration.
+ * This prevents agent processes from modifying security configuration.
  *
  * Allowlist location: ~/.config/nanoclaw/mount-allowlist.json
  */
@@ -197,21 +197,21 @@ function findAllowedRoot(
 }
 
 /**
- * Validate the container path to prevent escaping /workspace/extra/
+ * Validate the mount path to prevent escaping /workspace/extra/
  */
-function isValidContainerPath(containerPath: string): boolean {
+function isValidMountPath(mountPath: string): boolean {
   // Must not contain .. to prevent path traversal
-  if (containerPath.includes('..')) {
+  if (mountPath.includes('..')) {
     return false;
   }
 
   // Must not be absolute (it will be prefixed with /workspace/extra/)
-  if (containerPath.startsWith('/')) {
+  if (mountPath.startsWith('/')) {
     return false;
   }
 
   // Must not be empty
-  if (!containerPath || containerPath.trim() === '') {
+  if (!mountPath || mountPath.trim() === '') {
     return false;
   }
 
@@ -222,7 +222,7 @@ export interface MountValidationResult {
   allowed: boolean;
   reason: string;
   realHostPath?: string;
-  resolvedContainerPath?: string;
+  resolvedMountPath?: string;
   effectiveReadonly?: boolean;
 }
 
@@ -244,14 +244,14 @@ export function validateMount(
     };
   }
 
-  // Derive containerPath from hostPath basename if not specified
-  const containerPath = mount.containerPath || path.basename(mount.hostPath);
+  // Derive mountPath from hostPath basename if not specified
+  const resolvedMountPath = mount.mountPath || path.basename(mount.hostPath);
 
-  // Validate container path (cheap check)
-  if (!isValidContainerPath(containerPath)) {
+  // Validate mount path (cheap check)
+  if (!isValidMountPath(resolvedMountPath)) {
     return {
       allowed: false,
-      reason: `Invalid container path: "${containerPath}" - must be relative, non-empty, and not contain ".."`,
+      reason: `Invalid mount path: "${resolvedMountPath}" - must be relative, non-empty, and not contain ".."`,
     };
   }
 
@@ -323,7 +323,7 @@ export function validateMount(
     allowed: true,
     reason: `Allowed under root "${allowedRoot.path}"${allowedRoot.description ? ` (${allowedRoot.description})` : ''}`,
     realHostPath: realPath,
-    resolvedContainerPath: containerPath,
+    resolvedMountPath,
     effectiveReadonly,
   };
 }
@@ -339,12 +339,12 @@ export function validateAdditionalMounts(
   isMain: boolean,
 ): Array<{
   hostPath: string;
-  containerPath: string;
+  mountPath: string;
   readonly: boolean;
 }> {
   const validatedMounts: Array<{
     hostPath: string;
-    containerPath: string;
+    mountPath: string;
     readonly: boolean;
   }> = [];
 
@@ -354,7 +354,7 @@ export function validateAdditionalMounts(
     if (result.allowed) {
       validatedMounts.push({
         hostPath: result.realHostPath!,
-        containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
+        mountPath: `/workspace/extra/${result.resolvedMountPath}`,
         readonly: result.effectiveReadonly!,
       });
 
@@ -362,7 +362,7 @@ export function validateAdditionalMounts(
         {
           group: groupName,
           hostPath: result.realHostPath,
-          containerPath: result.resolvedContainerPath,
+          mountPath: result.resolvedMountPath,
           readonly: result.effectiveReadonly,
           reason: result.reason,
         },
@@ -373,7 +373,7 @@ export function validateAdditionalMounts(
         {
           group: groupName,
           requestedPath: mount.hostPath,
-          containerPath: mount.containerPath,
+          mountPath: mount.mountPath,
           reason: result.reason,
         },
         'Additional mount REJECTED',

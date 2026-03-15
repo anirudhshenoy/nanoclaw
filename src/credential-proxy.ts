@@ -1,11 +1,11 @@
 /**
- * Credential proxy for container isolation.
- * Containers connect here instead of directly to the Anthropic API.
- * The proxy injects real credentials so containers never see them.
+ * Credential proxy for agent isolation.
+ * Agent processes connect here instead of directly to the Anthropic API.
+ * The proxy injects real credentials so agents never see them.
  *
  * Two primary auth modes:
  *   API key:  Proxy injects x-api-key on every request.
- *   OAuth:    Container CLI exchanges its placeholder token for a temp
+ *   OAuth:    Agent CLI exchanges its placeholder token for a temp
  *             API key via /api/oauth/claude_cli/create_api_key.
  *             Proxy injects real OAuth token on that exchange request;
  *             subsequent requests carry the temp key which is valid as-is.
@@ -16,6 +16,9 @@
  *   endpoint (for example LiteLLM exposing /v1/messages and backed by a
  *   ChatGPT/Codex subscription).
  */
+/** Agents run on the same host — proxy binds to loopback. */
+export const PROXY_BIND_HOST = process.env.CREDENTIAL_PROXY_HOST || '127.0.0.1';
+
 import {
   createServer,
   IncomingMessage,
@@ -164,7 +167,7 @@ function applyPrimaryAuth(
   }
 
   // OAuth mode: replace placeholder Bearer token with the real one only when
-  // the container actually sends an Authorization header (exchange request +
+  // the agent actually sends an Authorization header (exchange request +
   // auth probes). Post-exchange requests use x-api-key only, so they pass
   // through without token injection.
   if (headers.authorization) {

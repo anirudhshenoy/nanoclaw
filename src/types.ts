@@ -1,20 +1,20 @@
 export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
-  containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
+  mountPath?: string; // Optional — defaults to basename of hostPath. Resolved at /workspace/extra/{value}
   readonly?: boolean; // Default: true for safety
 }
 
 /**
  * Mount Allowlist - Security configuration for additional mounts
  * This file should be stored at ~/.config/nanoclaw/mount-allowlist.json
- * and is NOT mounted into any container, making it tamper-proof from agents.
+ * and is NOT accessible to agent processes, making it tamper-proof.
  */
 export interface MountAllowlist {
-  // Directories that can be mounted into containers
+  // Directories that agents can access
   allowedRoots: AllowedRoot[];
-  // Glob patterns for paths that should never be mounted (e.g., ".ssh", ".gnupg")
+  // Glob patterns for paths that should never be accessible (e.g., ".ssh", ".gnupg")
   blockedPatterns: string[];
-  // If true, non-main groups can only mount read-only regardless of config
+  // If true, non-main groups can only access read-only regardless of config
   nonMainReadOnly: boolean;
 }
 
@@ -27,7 +27,7 @@ export interface AllowedRoot {
   description?: string;
 }
 
-export interface ContainerConfig {
+export interface ProcessConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
 }
@@ -37,7 +37,7 @@ export interface RegisteredGroup {
   folder: string;
   trigger: string;
   added_at: string;
-  containerConfig?: ContainerConfig;
+  processConfig?: ProcessConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }

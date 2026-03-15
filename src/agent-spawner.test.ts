@@ -2,15 +2,14 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
-// Sentinel markers must match container-runner.ts
+// Sentinel markers must match agent-spawner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
-  CONTAINER_MAX_OUTPUT_SIZE: 10485760,
-  CONTAINER_TIMEOUT: 1800000, // 30min
+  AGENT_MAX_OUTPUT_SIZE: 10485760,
+  AGENT_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
@@ -86,7 +85,7 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { spawnAgent, AgentOutput } from './agent-spawner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -105,13 +104,13 @@ const testInput = {
 
 function emitOutputMarker(
   proc: ReturnType<typeof createFakeProcess>,
-  output: ContainerOutput,
+  output: AgentOutput,
 ) {
   const json = JSON.stringify(output);
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
 
-describe('container-runner timeout behavior', () => {
+describe('agent-spawner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
@@ -123,7 +122,7 @@ describe('container-runner timeout behavior', () => {
 
   it('timeout after output resolves as success', async () => {
     const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
+    const resultPromise = spawnAgent(
       testGroup,
       testInput,
       () => {},
@@ -143,7 +142,7 @@ describe('container-runner timeout behavior', () => {
     // Fire the hard timeout (IDLE_TIMEOUT + 30s = 1830000ms)
     await vi.advanceTimersByTimeAsync(1830000);
 
-    // Emit close event (as if container was stopped by the timeout)
+    // Emit close event (as if process was stopped by the timeout)
     fakeProc.emit('close', 137);
 
     // Let the promise resolve
@@ -159,7 +158,7 @@ describe('container-runner timeout behavior', () => {
 
   it('timeout with no output resolves as error', async () => {
     const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
+    const resultPromise = spawnAgent(
       testGroup,
       testInput,
       () => {},
@@ -182,7 +181,7 @@ describe('container-runner timeout behavior', () => {
 
   it('normal exit after output resolves as success', async () => {
     const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
+    const resultPromise = spawnAgent(
       testGroup,
       testInput,
       () => {},

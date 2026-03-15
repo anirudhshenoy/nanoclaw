@@ -41,10 +41,10 @@ function writeUsageFile(data: Record<string, DayUsage>): void {
 }
 
 /**
- * Called by container-runner after each container run.
+ * Called by agent-spawner after each agent run.
  * Reads the session-usage.json written by the agent runner and accumulates into daily totals.
  */
-export function recordContainerUsage(groupIpcDir: string): void {
+export function recordAgentUsage(groupIpcDir: string): void {
   const usageFile = path.join(groupIpcDir, 'session-usage.json');
   if (!fs.existsSync(usageFile)) return;
 

@@ -131,7 +131,7 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['x-api-key']).toBe('sk-ant-real-key');
   });
 
-  it('OAuth mode replaces Authorization when container sends one', async () => {
+  it('OAuth mode replaces Authorization when agent sends one', async () => {
     proxyPort = await startProxy({
       CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
@@ -153,7 +153,7 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders.authorization).toBe('Bearer real-oauth-token');
   });
 
-  it('OAuth mode does not inject Authorization when container omits it', async () => {
+  it('OAuth mode does not inject Authorization when agent omits it', async () => {
     proxyPort = await startProxy({
       CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
