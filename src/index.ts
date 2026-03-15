@@ -144,6 +144,34 @@ export function _setRegisteredGroups(
 }
 
 /**
+ * Handle slash commands for the main group.
+ * Returns the response string if the message was a command, null otherwise.
+ * Strips Telegram @botname suffix (e.g. /session@mybot → /session).
+ */
+function handleSlashCommand(
+  content: string,
+  groupFolder: string,
+): string | null {
+  const cmdText = content.trim().replace(/^(\/\w+)@\S+/, '$1');
+  if (cmdText.startsWith('/model')) return handleModelCommand(cmdText);
+  if (cmdText.startsWith('/thinking')) return handleThinkingCommand(cmdText);
+  if (cmdText.startsWith('/usage')) return handleUsageCommand();
+  if (cmdText.startsWith('/session')) {
+    const args = cmdText.slice('/session'.length).trim();
+    if (args === 'new' || args === 'reset') {
+      delete sessions[groupFolder];
+      clearSession(groupFolder);
+      return 'Session cleared. Starting fresh on next message.';
+    }
+    const sessionId = sessions[groupFolder];
+    return sessionId
+      ? `Active session: ${sessionId}`
+      : 'No active session (will start fresh on next message).';
+  }
+  return null;
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
@@ -171,30 +199,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Intercept slash commands for main group
   if (isMainGroup) {
     const lastMsg = missedMessages[missedMessages.length - 1];
-    // Strip Telegram @botname suffix from commands (e.g. /session@mybot → /session)
-    const cmdText = lastMsg.content.trim().replace(/^(\/\w+)@\S+/, '$1');
-
-    let response: string | null = null;
-    if (cmdText.startsWith('/model')) {
-      response = handleModelCommand(cmdText);
-    } else if (cmdText.startsWith('/thinking')) {
-      response = handleThinkingCommand(cmdText);
-    } else if (cmdText.startsWith('/usage')) {
-      response = handleUsageCommand();
-    } else if (cmdText.startsWith('/session')) {
-      const args = cmdText.slice('/session'.length).trim();
-      if (args === 'new' || args === 'reset') {
-        delete sessions[group.folder];
-        clearSession(group.folder);
-        response = 'Session cleared. Starting fresh on next message.';
-      } else {
-        const sessionId = sessions[group.folder];
-        response = sessionId
-          ? `Active session: ${sessionId}`
-          : 'No active session (will start fresh on next message).';
-      }
-    }
-
+    const response = handleSlashCommand(lastMsg.content, group.folder);
     if (response !== null) {
       await channel.sendMessage(chatJid, response);
       lastAgentTimestamp[chatJid] = lastMsg.timestamp;
@@ -506,6 +511,21 @@ async function startMessageLoop(): Promise<void> {
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
+          }
+
+          // Intercept slash commands for main group even when agent is active
+          if (isMainGroup) {
+            const lastMsg = groupMessages[groupMessages.length - 1];
+            const cmdResponse = handleSlashCommand(
+              lastMsg.content,
+              group.folder,
+            );
+            if (cmdResponse !== null) {
+              await channel.sendMessage(chatJid, cmdResponse);
+              lastAgentTimestamp[chatJid] = lastMsg.timestamp;
+              saveState();
+              continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
