@@ -1,7 +1,10 @@
+import fs from 'fs';
 import https from 'https';
+import path from 'path';
+
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -193,7 +196,63 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      // Download the largest photo variant to the group's media directory
+      const largest = ctx.message.photo[ctx.message.photo.length - 1];
+      let content = '[Photo]';
+      try {
+        const file = await ctx.api.getFile(largest.file_id);
+        if (file.file_path) {
+          const mediaDir = path.join(GROUPS_DIR, group.folder, 'media');
+          fs.mkdirSync(mediaDir, { recursive: true });
+          const ext = path.extname(file.file_path) || '.jpg';
+          const savePath = path.join(mediaDir, `${Date.now()}${ext}`);
+          const downloadUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+          await new Promise<void>((resolve, reject) => {
+            const out = fs.createWriteStream(savePath);
+            https
+              .get(downloadUrl, (res) => {
+                res.pipe(out);
+                out.on('finish', () => {
+                  out.close();
+                  resolve();
+                });
+                out.on('error', reject);
+                res.on('error', reject);
+              })
+              .on('error', reject);
+          });
+          const caption = ctx.message.caption ? ` — ${ctx.message.caption}` : '';
+          content = `[Photo saved to ${savePath}${caption}. Use the Read tool to view it.]`;
+          logger.info({ savePath, group: group.name }, 'Telegram photo downloaded');
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Failed to download Telegram photo');
+      }
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
@@ -214,14 +273,19 @@ export class TelegramChannel implements Channel {
     });
 
     // Register bot command menu
-    this.bot.api.setMyCommands([
-      { command: 'session', description: 'Show or reset the active session' },
-      { command: 'usage', description: 'Show token usage for the last 7 days' },
-      { command: 'model', description: 'Show or change the AI model' },
-      { command: 'thinking', description: 'Toggle extended thinking' },
-      { command: 'chatid', description: 'Show this chat\'s registration ID' },
-      { command: 'ping', description: 'Check if the bot is online' },
-    ]).catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
+    this.bot.api
+      .setMyCommands([
+        { command: 'session', description: 'Show or reset the active session' },
+        {
+          command: 'usage',
+          description: 'Show token usage for the last 7 days',
+        },
+        { command: 'model', description: 'Show or change the AI model' },
+        { command: 'thinking', description: 'Toggle extended thinking' },
+        { command: 'chatid', description: "Show this chat's registration ID" },
+        { command: 'ping', description: 'Check if the bot is online' },
+      ])
+      .catch((err) => logger.warn({ err }, 'Failed to set bot commands'));
 
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {
