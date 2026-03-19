@@ -298,7 +298,13 @@ export class TelegramChannel implements Channel {
           const script = `import mlx_whisper, sys; r = mlx_whisper.transcribe(sys.argv[1], path_or_hf_repo="mlx-community/whisper-large-v3-turbo"); print(r["text"].strip())`;
           const transcript = execSync(
             `python3 -c ${JSON.stringify(script)} ${JSON.stringify(savePath)}`,
-            { timeout: 120_000, env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` } },
+            {
+              timeout: 120_000,
+              env: {
+                ...process.env,
+                PATH: `/opt/homebrew/bin:${process.env.HOME}/.local/bin:${process.env.PATH}`,
+              },
+            },
           )
             .toString()
             .trim();
@@ -322,7 +328,13 @@ export class TelegramChannel implements Channel {
         'Unknown';
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
