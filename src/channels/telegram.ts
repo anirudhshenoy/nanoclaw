@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
@@ -226,12 +227,91 @@ export class TelegramChannel implements Channel {
               })
               .on('error', reject);
           });
-          const caption = ctx.message.caption ? ` — ${ctx.message.caption}` : '';
+          const caption = ctx.message.caption
+            ? ` — ${ctx.message.caption}`
+            : '';
           content = `[Photo saved to ${savePath}${caption}. Use the Read tool to view it.]`;
-          logger.info({ savePath, group: group.name }, 'Telegram photo downloaded');
+          logger.info(
+            { savePath, group: group.name },
+            'Telegram photo downloaded',
+          );
         }
       } catch (err) {
         logger.warn({ err }, 'Failed to download Telegram photo');
+      }
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    });
+    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
+    this.bot.on('message:voice', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      let content = '[Voice message]';
+      try {
+        const file = await ctx.api.getFile(ctx.message.voice.file_id);
+        if (file.file_path) {
+          const mediaDir = path.join(GROUPS_DIR, group.folder, 'media');
+          fs.mkdirSync(mediaDir, { recursive: true });
+          const savePath = path.join(mediaDir, `${Date.now()}.ogg`);
+          const downloadUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+          await new Promise<void>((resolve, reject) => {
+            const out = fs.createWriteStream(savePath);
+            https
+              .get(downloadUrl, (res) => {
+                res.pipe(out);
+                out.on('finish', () => {
+                  out.close();
+                  resolve();
+                });
+                out.on('error', reject);
+                res.on('error', reject);
+              })
+              .on('error', reject);
+          });
+
+          // Transcribe with mlx_whisper
+          const script = `import mlx_whisper, sys; r = mlx_whisper.transcribe(sys.argv[1], path_or_hf_repo="mlx-community/whisper-large-v3-turbo"); print(r["text"].strip())`;
+          const transcript = execSync(
+            `python3 -c ${JSON.stringify(script)} ${JSON.stringify(savePath)}`,
+            { timeout: 120_000, env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` } },
+          )
+            .toString()
+            .trim();
+
+          fs.unlinkSync(savePath); // clean up after transcription
+          content = `[Voice: ${transcript}]`;
+          logger.info(
+            { group: group.name, chars: transcript.length },
+            'Telegram voice transcribed',
+          );
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Failed to transcribe Telegram voice message');
       }
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
@@ -253,8 +333,6 @@ export class TelegramChannel implements Channel {
         is_from_me: false,
       });
     });
-    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
